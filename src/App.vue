@@ -40,7 +40,7 @@
     </div>
 
     <!-- 音视频编码配置面板（暂未开放） -->
-    <div v-if="false" class="settings-section" :class="{ expanded: showSettings }">
+    <div class="settings-section" :class="{ expanded: showSettings }">
       <div class="settings-toggle" @click="showSettings = !showSettings">
         <svg :class="{ rotated: showSettings }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <polyline points="6 9 12 15 18 9" />
@@ -142,6 +142,11 @@
               ]" size="small" style="width:100%" />
             </div>
             <div class="settings-field">
+              <label class="field-label">线程数</label>
+              <t-input-number v-model="threads" :min="1" :max="32" :step="1"
+                placeholder="线程数" size="small" theme="normal" style="width:100%" />
+            </div>
+            <div class="settings-field">
               <label class="field-label">自动格式</label>
               <span class="field-hint">→ {{ outputFormatComputed }}</span>
             </div>
@@ -172,7 +177,7 @@
         </div>
         <div class="tl-track">
           <div class="tl-range-visual" :style="{ left: leftPercent, right: rightPercent }"></div>
-          <t-slider v-model="slideRange" :max="videoDuration" range :disabled="isFFmpegProcessing" @change="onSliderChangeHandler" />
+          <t-slider v-model="slideRange" :max="videoDuration" :step="0.01" range :disabled="isFFmpegProcessing" @change="onSliderChangeHandler" />
         </div>
         <div class="tl-node tl-end">
           <span class="tl-time">{{ formatTime(slideRange[1]) }}</span>
@@ -185,10 +190,29 @@
       </div>
 
       <div class="bar-section bar-actions">
-        <t-button theme="success" :disabled="!isVideoLoaded"
-          :loading="isFFmpegProcessing" @click="onStartTransCodeClickHandler">
-          {{ isFFmpegProcessing ? '正在生成' : '开始生成' }}
-        </t-button>
+        <t-popup trigger="hover" :disabled="!isFFmpegProcessing" placement="top">
+          <t-button theme="success" :disabled="!isVideoLoaded"
+            :loading="isFFmpegProcessing" @click="onStartTransCodeClickHandler">
+            {{ isFFmpegProcessing ? '正在生成' : '开始生成' }}
+          </t-button>
+          <template #content>
+            <div class="processing-popup">
+              <div class="popup-row">
+                <span class="popup-label">已用时</span>
+                <span class="popup-value">{{ (processingElapsed / 1000).toFixed(1) }}s</span>
+              </div>
+              <div class="popup-row">
+                <span class="popup-label">进度</span>
+                <span class="popup-value">{{ generatePercent }}</span>
+              </div>
+              <t-button theme="danger" size="small"
+                style="width: 100%; margin-top: 8px;"
+                @click="onAbortTransCodeClickHandler">
+                终止生成
+              </t-button>
+            </div>
+          </template>
+        </t-popup>
         <t-button variant="outline" :disabled="!isOutputed"
           @click="onDownloadOutputClickHandler">
           下载结果
@@ -218,16 +242,17 @@
       </template>
     </footer>
 
-    <t-drawer v-model:visible="showLogDrawer" :size="600" z-index="4000" :footer="false">
+    <t-drawer v-model:visible="showLogDrawer" :size="800" z-index="4000" :footer="false">
       <template #header>
         <div class="log-drawer-header">
           <span>日志</span>
           <span class="log-count">{{ ffmpegLogs.length }} 条</span>
+          <t-checkbox v-model="logAutoScroll">自动滚动</t-checkbox>
           <t-button size="small" theme="danger" :disabled="ffmpegLogs.length === 0"
             @click="ffmpegLogs = []">清空</t-button>
         </div>
       </template>
-      <div class="log-container">
+      <div class="log-container" ref="logContainerRef">
         <div v-if="ffmpegLogs.length === 0" class="log-empty">暂无日志</div>
         <div v-for="(line, i) in ffmpegLogs" :key="i" class="log-line">{{ line }}</div>
       </div>
@@ -237,14 +262,11 @@
 
 <script setup lang="ts">
 import { MessagePlugin } from 'tdesign-vue-next';
-import { computed, onBeforeMount, onMounted, ref, shallowRef, watch } from 'vue';
+import { computed, nextTick, onBeforeMount, onMounted, ref, shallowRef, watch } from 'vue';
 import { FFmpeg } from '@ffmpeg/ffmpeg'
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
 import NotificationPlugin from 'tdesign-vue-next/es/notification/plugin';
 import { saveAs } from 'file-saver';
-
-import dayjs from 'dayjs';
-import objectSupport from 'dayjs/plugin/objectSupport'
 
 import prettyBytes from 'pretty-bytes';
 
@@ -264,15 +286,27 @@ const outputVideoBlobUrl = ref<string>()
 const outputUsageDuration = ref<number>(0)
 const generatePercent = ref<string>('0%')
 const isOutputed = ref<boolean>(false)
+const processingElapsed = ref<number>(0)
+let processingTimer: ReturnType<typeof setInterval> | null = null
 
 // ===== 日志 =====
 const showLogDrawer = ref<boolean>(false)
 const ffmpegLogs = ref<string[]>([])
+const logAutoScroll = ref<boolean>(true)
+const logContainerRef = ref<HTMLElement>()
 
 const logUserAction = (action: string) => {
-  const ts = new Date().toISOString().slice(11, 23)
+  const ts = new Date().toLocaleTimeString() + '.' + new Date().getMilliseconds()
   ffmpegLogs.value.push(`[${ts}] [用户] ${action}`)
 }
+
+watch(() => ffmpegLogs.value.length, () => {
+  if (logAutoScroll.value) {
+    nextTick(() => {
+      logContainerRef.value?.scrollTo({ top: logContainerRef.value.scrollHeight })
+    })
+  }
+})
 
 // ===== 音视频编码配置 =====
 const showSettings = ref<boolean>(false)
@@ -285,11 +319,12 @@ const audioCodec = ref<string>('copy')
 const audioBitrate = ref<number>(128)
 const audioSampleRate = ref<string>('original')
 const outputFormat = ref<string>('mp4')
+const threads = ref<number>(20)
 const compressionPreset = ref<string>('visually_lossless')
 
 const encodingConfig = ref({
   videoCodec, videoResolution, videoFrameRate, videoBitrate, videoCRF,
-  audioCodec, audioBitrate, audioSampleRate, outputFormat
+  audioCodec, audioBitrate, audioSampleRate, outputFormat, threads
 })
 
 const outputFormatComputed = computed(() => {
@@ -346,8 +381,15 @@ const clipDurationSeconds = computed(() => {
 
 const formatTime = (seconds: number): string => {
   const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
+  const s = seconds % 60
+  return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`
+}
+
+const formatFFmpegTime = (seconds: number): string => {
+  const h = Math.floor(seconds / 3600)
+  const m = Math.floor((seconds % 3600) / 60)
+  const s = seconds % 60
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`
 }
 
 const leftPercent = computed(() => {
@@ -361,8 +403,6 @@ const rightPercent = computed(() => {
 })
 
 onMounted(() => {
-  dayjs.extend(objectSupport);
-
   if (!window.WebAssembly) {
     alert("你的浏览器不支持 WebAssembly")
   }
@@ -415,11 +455,36 @@ const resetOutputStatus = () => {
   generatePercent.value = '0%'
 }
 
+const startProcessingTimer = () => {
+  processingElapsed.value = 0
+  processingTimer = setInterval(() => {
+    processingElapsed.value += 100
+  }, 100)
+}
+
+const stopProcessingTimer = () => {
+  if (processingTimer) {
+    clearInterval(processingTimer)
+    processingTimer = null
+  }
+}
+
+const onAbortTransCodeClickHandler = () => {
+  if (ffmpegRef.value) {
+    
+    ffmpegRef.value.terminate()
+    ffmpegRef.value = undefined
+    logUserAction('用户终止生成')
+    NotificationPlugin.warning({ title: "已终止生成" })
+  }
+}
+
 const onStartTransCodeClickHandler = async () => {
   resetOutputStatus()
   logUserAction('开始生成')
   try {
     isFFmpegProcessing.value = true;
+    startProcessingTimer()
 
     const startTime = performance.now();
 
@@ -439,6 +504,7 @@ const onStartTransCodeClickHandler = async () => {
     console.error(error)
     logUserAction(`生成失败: ${error}`)
   } finally {
+    stopProcessingTimer()
     isFFmpegProcessing.value = false;
   }
 }
@@ -455,7 +521,7 @@ const setupFFmpeg = async () => {
     })
 
     ffmpeg.on('log', ({ message }) => {
-      const ts = new Date().toISOString().slice(11, 23)
+      const ts = new Date().toLocaleTimeString() + '.' + new Date().getMilliseconds()
       const line = `[${ts}] ${message}`
       console.log(line)
       ffmpegLogs.value.push(line)
@@ -480,39 +546,70 @@ const ffmpegTransCode = (): Promise<void> => {
       const inputFileName = rawFile.value?.name ?? 'input.mp4';
       await ffmpeg!.writeFile(inputFileName, await fetchFile(rawFile.value));
 
-      const startTime = dayjs({ second: slideRange.value[0] }).format('HH:mm:ss')
-      const endTime = dayjs({ second: slideRange.value[1] }).format('HH:mm:ss')
+      const startTime = formatFFmpegTime(slideRange.value[0])
+      const endTime = formatFFmpegTime(slideRange.value[1])
 
       const outputFileName = `output.${outputFormat.value}`
-      const args: string[] = ['-ss', startTime, '-to', endTime, '-i', inputFileName]
+
+      // 探测输入文件的流信息
+      let hasAudio = false
+      const probeHandler = ({ message }: { message: string }) => {
+        if (message.includes('Audio:')) hasAudio = true
+      }
+      ffmpeg!.on('log', probeHandler)
+      try {
+        await ffmpeg!.exec(['-i', inputFileName])
+      } catch {
+        // ffmpeg -i 无输出文件会以非零状态退出，这是预期行为
+      }
+      ffmpeg!.off('log', probeHandler)
+      logUserAction(`流探测: ${hasAudio ? '包含音频' : '无音频流'}`)
+
+      const args: string[] = [
+        
+      '-ss', startTime, '-to', endTime, '-i', inputFileName]
 
       // 视频编码
       if (videoCodec.value === 'copy') {
         args.push('-c:v', 'copy')
       } else {
-        args.push('-c:v', 'libx264', '-crf', String(videoCRF.value))
+        args.push('-c:v', 'libx264')
+        // CRF 与 bitrate 互斥：指定码率时用 -b:v，否则用 -crf
+        if (videoBitrate.value) {
+          args.push('-b:v', `${videoBitrate.value}k`)
+        } else {
+          args.push('-crf', String(videoCRF.value))
+        }
         if (videoFrameRate.value !== 'original') {
           args.push('-r', videoFrameRate.value)
         }
         if (videoResolution.value !== 'original') {
           args.push('-vf', `scale=-2:${videoResolution.value}`)
         }
-        if (videoBitrate.value) {
-          args.push('-b:v', `${videoBitrate.value}k`)
-        }
       }
 
-      // 音频编码
-      if (audioCodec.value === 'copy') {
-        args.push('-c:a', 'copy')
-      } else {
-        args.push('-c:a', audioCodec.value, '-b:a', `${audioBitrate.value}k`)
-        if (audioSampleRate.value !== 'original') {
-          args.push('-ar', audioSampleRate.value)
+      // 音频编码（仅当输入包含音频流时添加）
+      if (hasAudio) {
+        if (audioCodec.value === 'copy') {
+          args.push('-c:a', 'copy')
+        } else {
+          args.push('-c:a', audioCodec.value, '-b:a', `${audioBitrate.value}k`)
+          if (audioSampleRate.value !== 'original') {
+            args.push('-ar', audioSampleRate.value)
+          }
         }
       }
-
-      args.push('-movflags', '+faststart', outputFileName)
+      args.push(
+        '-fflags', '+genpts+igndts',
+        '-fps_mode', 'cfr',
+        '-r', '30',
+      )
+      args.push('-threads', String(threads.value))
+      args.push('-loglevel', 'debug')
+      args.push('-avoid_negative_ts', 'make_zero')
+      args.push('-max_muxing_queue_size', '1024')
+      args.push('-movflags', '+faststart')
+      args.push(outputFileName)
 
       const argsStr = args.join(' ')
       console.info('[ffmpeg args]', argsStr)
@@ -958,6 +1055,8 @@ $shadow-card-hover: 0 1px 2px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.06);
   font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
   font-size: 12px;
   line-height: 1.7;
+  height: 100%;
+  overflow-y: auto;
 }
 
 .log-empty {
@@ -1103,6 +1202,31 @@ $shadow-card-hover: 0 1px 2px rgba(0,0,0,0.04), 0 4px 16px rgba(0,0,0,0.06);
 
   :deep(.t-slider) {
     flex: 1;
+  }
+}
+
+/* ===== 生成中悬浮窗 ===== */
+.processing-popup {
+  padding: 12px 16px;
+  min-width: 160px;
+}
+
+.popup-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+
+  .popup-label {
+    font-size: 12px;
+    color: $text-secondary;
+  }
+
+  .popup-value {
+    font-size: 13px;
+    font-weight: 600;
+    color: $text-primary;
+    font-variant-numeric: tabular-nums;
   }
 }
 </style>
